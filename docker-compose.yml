@@ -1,0 +1,64 @@
+version: '3.8'
+
+# ============================================================
+# Hospital Management System — Docker Compose
+# Services : MongoDB + Backend + Frontend
+# ============================================================
+
+services:
+
+  # --- Base de données MongoDB ---
+  mongodb:
+    image: mongo:6
+    container_name: hospital-mongodb
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+    networks:
+      - hospital-network
+    healthcheck:
+      test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/test --quiet
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # --- Backend Express.js ---
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: hospital-backend
+    ports:
+      - "6005:6005"
+    environment:
+      - DB_Url=mongodb://mongodb:27017/hospital
+      - PORT=6005
+      - JWT_SECRET=${JWT_SECRET:-default_secret_change_in_prod}
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    networks:
+      - hospital-network
+    restart: unless-stopped
+
+  # --- Frontend React (Nginx) ---
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    container_name: hospital-frontend
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+    networks:
+      - hospital-network
+    restart: unless-stopped
+
+networks:
+  hospital-network:
+    driver: bridge
+
+volumes:
+  mongodb_data:

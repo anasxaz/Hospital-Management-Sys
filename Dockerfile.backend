@@ -1,0 +1,21 @@
+# ============================================================
+# Dockerfile — Backend (Node.js + Express)
+# Port: 6005
+# ============================================================
+
+FROM node:18-alpine
+
+WORKDIR /app
+
+# Copier les fichiers de dépendances en premier (cache Docker)
+COPY Backend/package*.json ./
+
+# Installer uniquement les dépendances de production
+RUN npm ci --only=production
+
+# Copier le reste du code backend
+COPY Backend/ .
+
+EXPOSE 6005
+
+CMD ["node", "server.js"]
