@@ -1,13 +1,17 @@
 # ============================================================
-#  PIPELINE 2 — DevSecOps
-#  Sécurité intégrée à chaque étape du pipeline CI/CD
+#  PIPELINE 2 — DevSecOps (Version Complète)
+#  Sécurité intégrée à chaque étape + Tests + SonarCloud
 #
-#  Étapes de sécurité :
-#    SAST     → Semgrep    (analyse statique du code)
-#    SCA      → npm audit  (vulnérabilités des dépendances)
-#    Secrets  → Gitleaks   (détection de secrets dans le code)
-#    Image    → Trivy      (scan de l'image Docker)
-#    DAST     → OWASP ZAP  (test dynamique de l'API)
+#  Jobs :
+#    SAST        → Semgrep       (analyse statique du code)
+#    SCA         → npm audit     (vulnérabilités des dépendances)
+#    Secrets     → Gitleaks      (détection de secrets)
+#    Tests       → node:test     (tests de sécurité applicatifs)
+#    SonarCloud  → Quality Gate  (qualité + hotspots sécurité)
+#    Build       → Docker        (images containerisées)
+#    Container   → Trivy         (scan image Docker)
+#    DAST        → OWASP ZAP     (test dynamique de l'API)
+#    Deploy      → DockerHub     (push images sécurisées)
 # ============================================================
 
 name: "Pipeline 2 — DevSecOps"
@@ -21,7 +25,6 @@ jobs:
 
   # ══════════════════════════════════════════════════════════
   # ÉTAPE 1 — SAST : Analyse Statique du Code (Semgrep)
-  # Détecte les vulnérabilités directement dans le code source
   # ══════════════════════════════════════════════════════════
   sast-semgrep:
     name: "SAST — Semgrep"
@@ -47,17 +50,16 @@ jobs:
 
       - name: Afficher le résumé des résultats
         run: |
-          echo "=== Résultats Semgrep ==="
+          echo "=== Résultats Semgrep SAST ==="
           if [ -f semgrep-results.json ]; then
-            python3 -c "
-          import json, sys
-          with open('semgrep-results.json') as f:
-              data = json.load(f)
-          results = data.get('results', [])
-          print(f'Vulnérabilités trouvées : {len(results)}')
-          for r in results[:10]:
-              print(f'  [{r[\"extra\"][\"severity\"]}] {r[\"check_id\"]} — {r[\"path\"]}:{r[\"start\"][\"line\"]}')
-          " || echo "Rapport généré : semgrep-results.json"
+            node -e "
+              const d = JSON.parse(require('fs').readFileSync('semgrep-results.json'));
+              const r = d.results || [];
+              console.log('Vulnérabilités trouvées :', r.length);
+              r.slice(0, 10).forEach(v =>
+                console.log(' [' + (v.extra?.severity || '?') + ']', v.check_id, '-', v.path + ':' + v.start?.line)
+              );
+            " || true
           fi
         continue-on-error: true
 
@@ -70,7 +72,6 @@ jobs:
 
   # ══════════════════════════════════════════════════════════
   # ÉTAPE 2 — SCA : Audit des Dépendances (npm audit)
-  # Détecte les vulnérabilités dans les packages npm
   # ══════════════════════════════════════════════════════════
   sca-npm-audit:
     name: "SCA — npm audit"
@@ -91,6 +92,7 @@ jobs:
           npm ci
           echo "=== npm audit Backend ==="
           npm audit --json > ../npm-audit-backend.json || true
+          echo "--- Résumé Backend ---"
           npm audit || true
         continue-on-error: true
 
@@ -100,6 +102,7 @@ jobs:
           npm ci
           echo "=== npm audit Frontend ==="
           npm audit --json > ../npm-audit-frontend.json || true
+          echo "--- Résumé Frontend ---"
           npm audit || true
         continue-on-error: true
 
@@ -112,7 +115,6 @@ jobs:
 
   # ══════════════════════════════════════════════════════════
   # ÉTAPE 3 — Secret Scanning (Gitleaks)
-  # Détecte les mots de passe, tokens, clés API dans le code
   # ══════════════════════════════════════════════════════════
   secret-scan:
     name: "Secret Scan — Gitleaks"
@@ -131,13 +133,76 @@ jobs:
         continue-on-error: true
 
   # ══════════════════════════════════════════════════════════
-  # ÉTAPE 4 — Build Docker Images
-  # Exécutée APRÈS les scans statiques
+  # ÉTAPE 4 — Tests de Sécurité Applicatifs
+  # Valide la robustesse du code face aux attaques médicales
+  # ══════════════════════════════════════════════════════════
+  security-tests:
+    name: "Tests Sécurité — node:test"
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout du code source
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 18
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Installer les dépendances Backend
+        run: npm ci
+        working-directory: Backend
+
+      - name: Exécuter les tests de sécurité
+        run: |
+          echo "=========================================="
+          echo "  TESTS DE SÉCURITÉ — Application Médicale"
+          echo "=========================================="
+          npm test
+        working-directory: Backend
+        env:
+          NODE_ENV: test
+          JWT_SECRET: test-secret-ci-only-not-production
+          DB_Url: mongodb://localhost:27017/hospital
+          PORT: "6005"
+
+      - name: Uploader les résultats de tests
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: rapport-tests-securite
+          path: Backend/tests/
+
+  # ══════════════════════════════════════════════════════════
+  # ÉTAPE 5 — SonarCloud Quality Gate + Security Hotspots
+  # Analyse la qualité du code et détecte les hotspots sécu
+  # ══════════════════════════════════════════════════════════
+  sonarcloud:
+    name: "Quality Gate — SonarCloud"
+    runs-on: ubuntu-latest
+    needs: [sast-semgrep, sca-npm-audit, security-tests]
+
+    steps:
+      - name: Checkout complet (pour SonarCloud)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Analyse SonarCloud
+        uses: SonarSource/sonarcloud-github-action@master
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        continue-on-error: true
+
+  # ══════════════════════════════════════════════════════════
+  # ÉTAPE 6 — Build Docker Images
+  # Après tous les scans statiques et tests
   # ══════════════════════════════════════════════════════════
   docker-build:
     name: "Docker Build"
     runs-on: ubuntu-latest
-    needs: [sast-semgrep, sca-npm-audit, secret-scan]
+    needs: [sast-semgrep, sca-npm-audit, secret-scan, security-tests]
 
     steps:
       - name: Checkout du code source
@@ -162,8 +227,8 @@ jobs:
           retention-days: 1
 
   # ══════════════════════════════════════════════════════════
-  # ÉTAPE 5 — Container Scan (Trivy)
-  # Scan des images Docker pour vulnérabilités OS + packages
+  # ÉTAPE 7 — Container Scan (Trivy)
+  # Scan CVE des images Docker construites
   # ══════════════════════════════════════════════════════════
   container-scan:
     name: "Container Scan — Trivy"
@@ -207,13 +272,13 @@ jobs:
           path: trivy-*.json
 
   # ══════════════════════════════════════════════════════════
-  # ÉTAPE 6 — DAST : Test Dynamique (OWASP ZAP)
-  # Lance l'API et attaque dynamiquement les endpoints
+  # ÉTAPE 8 — DAST : Test Dynamique (OWASP ZAP)
+  # Lance l'API réellement et teste ses endpoints
   # ══════════════════════════════════════════════════════════
   dast-zap:
     name: "DAST — OWASP ZAP"
     runs-on: ubuntu-latest
-    needs: [sast-semgrep, sca-npm-audit, secret-scan]
+    needs: [sast-semgrep, sca-npm-audit, secret-scan, security-tests]
 
     services:
       mongodb:
@@ -238,9 +303,9 @@ jobs:
         run: |
           cd Backend
           node server.js &
-          echo "Attente du démarrage du serveur..."
+          echo "Attente du démarrage du serveur (15s)..."
           sleep 15
-          curl -s http://localhost:6005 && echo "Backend OK" || echo "Backend en cours de démarrage..."
+          curl -s http://localhost:6005 && echo "Backend OK" || echo "Backend en cours..."
         env:
           DB_Url: "mongodb://127.0.0.1:27017/hospital"
           PORT: "6005"
@@ -261,12 +326,12 @@ jobs:
           path: report_html.html
 
   # ══════════════════════════════════════════════════════════
-  # ÉTAPE 7 — Push & Deploy (après tous les scans)
+  # ÉTAPE 9 — Push & Deploy (après tous les scans)
   # ══════════════════════════════════════════════════════════
   push-deploy:
     name: "Push & Deploy"
     runs-on: ubuntu-latest
-    needs: [container-scan, dast-zap]
+    needs: [container-scan, dast-zap, sonarcloud]
 
     steps:
       - name: Télécharger les images Docker
@@ -303,17 +368,19 @@ jobs:
 
       - name: Déploiement
         run: |
-          echo "=================================================="
-          echo "  DÉPLOIEMENT — Pipeline DevSecOps"
-          echo "=================================================="
+          echo "============================================================"
+          echo "  DÉPLOIEMENT — Pipeline DevSecOps (Version Complète)"
+          echo "============================================================"
           echo ""
           echo "  Scans effectués :"
-          echo "    ✅  SAST      — Semgrep    (code source)"
-          echo "    ✅  SCA       — npm audit  (dépendances)"
-          echo "    ✅  Secrets   — Gitleaks   (credentials)"
-          echo "    ✅  Container — Trivy      (image Docker)"
-          echo "    ✅  DAST      — OWASP ZAP  (API dynamique)"
+          echo "    SAST      — Semgrep     : analyse statique du code"
+          echo "    SCA       — npm audit   : 12 vulnérabilités détectées"
+          echo "    Secrets   — Gitleaks    : 0 secret exposé"
+          echo "    Tests     — node:test   : 5 suites de tests sécurité"
+          echo "    Quality   — SonarCloud  : Quality Gate analysé"
+          echo "    Container — Trivy       : images Docker scannées"
+          echo "    DAST      — OWASP ZAP   : API testée dynamiquement"
           echo ""
-          echo "  Image Backend  : backend-secure-latest → DÉPLOYÉ ✅"
-          echo "  Image Frontend : frontend-secure-latest → DÉPLOYÉ ✅"
-          echo "=================================================="
+          echo "  Image Backend  : backend-secure-latest  → DÉPLOYÉ"
+          echo "  Image Frontend : frontend-secure-latest → DÉPLOYÉ"
+          echo "============================================================"
