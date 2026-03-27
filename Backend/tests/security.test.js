@@ -3,215 +3,278 @@
  *  Tests de Sécurité — Hospital Management System
  *  Contexte : Application médicale (données patients sensibles)
  *  Runner  : Node.js 18 built-in test runner (node:test)
+ *  Coverage: c8 (V8 coverage → lcov pour SonarCloud)
  * ============================================================
  */
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-// ──────────────────────────────────────────────────────────────
-//  1. VALIDATION DES DONNÉES PATIENTS
-//  Contexte : Empêcher la corruption des dossiers médicaux
-// ──────────────────────────────────────────────────────────────
-describe('Validation des données patients', () => {
+// Import du module de validation (remédiation SonarCloud Blockers)
+import {
+  sanitizeString,
+  validateEmail,
+  validateObjectId,
+  validatePatientData,
+  maskSensitiveData,
+} from '../api/utils/validators.js';
 
-  const isValidPatient = (patient) => {
-    if (!patient || typeof patient !== 'object') return false;
-    if (typeof patient.name !== 'string' || patient.name.trim().length === 0) return false;
-    if (typeof patient.age !== 'number' || patient.age <= 0 || patient.age >= 150) return false;
-    if (!['Male', 'Female', 'Other'].includes(patient.gender)) return false;
-    return true;
+// ──────────────────────────────────────────────────────────────
+//  1. sanitizeString — Protection contre les injections MongoDB
+//  Remédie à : CWE-943 (SonarCloud Blockers L14, L46, L72)
+// ──────────────────────────────────────────────────────────────
+describe('sanitizeString — Protection injection MongoDB', () => {
+
+  it('doit accepter une chaîne normale', () => {
+    assert.equal(sanitizeString('John Doe'), 'John Doe');
+  });
+
+  it('doit trimmer les espaces en début/fin', () => {
+    assert.equal(sanitizeString('  Jane Smith  '), 'Jane Smith');
+  });
+
+  it('doit rejeter les chaînes contenant $', () => {
+    assert.equal(sanitizeString('{ $where: "1==1" }'), null,
+      'L\'opérateur $where doit être rejeté');
+    assert.equal(sanitizeString('$gt'), null,
+      'L\'opérateur $gt doit être rejeté');
+    assert.equal(sanitizeString('$regex'), null,
+      'L\'opérateur $regex doit être rejeté');
+  });
+
+  it('doit rejeter les chaînes contenant { ou }', () => {
+    assert.equal(sanitizeString('{"key":"val"}'), null,
+      'Les objets JSON dans les inputs doivent être rejetés');
+  });
+
+  it('doit rejeter une chaîne vide ou uniquement des espaces', () => {
+    assert.equal(sanitizeString(''), null);
+    assert.equal(sanitizeString('   '), null);
+  });
+
+  it('doit rejeter les types non-string', () => {
+    assert.equal(sanitizeString(42), null);
+    assert.equal(sanitizeString(null), null);
+    assert.equal(sanitizeString(undefined), null);
+    assert.equal(sanitizeString({ '$gt': '' }), null,
+      'Un objet MongoDB passé directement doit être rejeté');
+  });
+
+});
+
+// ──────────────────────────────────────────────────────────────
+//  2. validateEmail — Validation des emails patients
+//  Remédie à : injection via email malformé dans findOne()
+// ──────────────────────────────────────────────────────────────
+describe('validateEmail — Validation adresses email', () => {
+
+  it('doit accepter un email valide', () => {
+    assert.equal(validateEmail('patient@hospital.ma'), 'patient@hospital.ma');
+  });
+
+  it('doit normaliser en minuscules', () => {
+    assert.equal(validateEmail('Patient@Hospital.MA'), 'patient@hospital.ma');
+  });
+
+  it('doit rejeter un email sans @', () => {
+    assert.equal(validateEmail('pasenmail'), null);
+  });
+
+  it('doit rejeter un email sans domaine', () => {
+    assert.equal(validateEmail('user@'), null);
+  });
+
+  it('doit rejeter une tentative d\'injection MongoDB via email', () => {
+    assert.equal(validateEmail({ '$gt': '' }), null,
+      'Un objet MongoDB en guise d\'email doit être rejeté');
+    assert.equal(validateEmail('user$injection@test.com'), null,
+      'Email contenant $ doit être rejeté');
+  });
+
+  it('doit rejeter les types non-string', () => {
+    assert.equal(validateEmail(null), null);
+    assert.equal(validateEmail(undefined), null);
+    assert.equal(validateEmail(123), null);
+  });
+
+});
+
+// ──────────────────────────────────────────────────────────────
+//  3. validateObjectId — Validation des IDs MongoDB
+//  Remédie à : SonarCloud Blocker L72 (deleteOne avec ID non validé)
+// ──────────────────────────────────────────────────────────────
+describe('validateObjectId — Validation identifiants MongoDB', () => {
+
+  it('doit accepter un ObjectId valide (24 hex)', () => {
+    assert.equal(validateObjectId('507f1f77bcf86cd799439011'),
+      '507f1f77bcf86cd799439011');
+  });
+
+  it('doit rejeter un ID trop court', () => {
+    assert.equal(validateObjectId('123abc'), null);
+  });
+
+  it('doit rejeter un ID avec caractères non-hex', () => {
+    assert.equal(validateObjectId('xxxxxxxxxxxxxxxxxxxxxxxx'), null,
+      'Un ID avec x (non-hex) doit être rejeté');
+  });
+
+  it('doit rejeter une tentative d\'injection via patientId', () => {
+    assert.equal(validateObjectId('{ $where: "1==1" }'), null);
+    assert.equal(validateObjectId({ '$ne': null }), null,
+      'Un objet MongoDB en guise d\'ID doit être rejeté');
+  });
+
+  it('doit rejeter les types non-string', () => {
+    assert.equal(validateObjectId(null), null);
+    assert.equal(validateObjectId(undefined), null);
+    assert.equal(validateObjectId(12345), null);
+  });
+
+});
+
+// ──────────────────────────────────────────────────────────────
+//  4. validatePatientData — Validation complète dossier patient
+//  Remédiation globale avant création/modification en base
+// ──────────────────────────────────────────────────────────────
+describe('validatePatientData — Validation dossier patient complet', () => {
+
+  const validPatient = {
+    name: 'John Doe',
+    email: 'john.doe@hospital.ma',
+    age: 35,
+    gender: 'Male',
+    mobile: '0612345678',
   };
 
   it('doit accepter un dossier patient valide', () => {
-    const patient = { name: 'John Doe', age: 35, gender: 'Male' };
-    assert.equal(isValidPatient(patient), true);
+    const result = validatePatientData(validPatient);
+    assert.equal(result.valid, true);
+    assert.equal(result.sanitized.name, 'John Doe');
+    assert.equal(result.sanitized.email, 'john.doe@hospital.ma');
   });
 
-  it('doit rejeter un nom vide (donnée médicale incomplète)', () => {
-    assert.equal(isValidPatient({ name: '', age: 30, gender: 'Male' }), false);
+  it('doit rejeter un nom vide', () => {
+    const result = validatePatientData({ ...validPatient, name: '' });
+    assert.equal(result.valid, false);
+    assert.ok(result.error);
   });
 
-  it('doit rejeter un âge invalide ou négatif', () => {
-    assert.equal(isValidPatient({ name: 'Jane', age: -1,  gender: 'Female' }), false);
-    assert.equal(isValidPatient({ name: 'Jane', age: 0,   gender: 'Female' }), false);
-    assert.equal(isValidPatient({ name: 'Jane', age: 200, gender: 'Female' }), false);
+  it('doit rejeter un nom avec opérateur MongoDB', () => {
+    const result = validatePatientData({ ...validPatient, name: '{ $where: 1 }' });
+    assert.equal(result.valid, false);
+  });
+
+  it('doit rejeter un email invalide', () => {
+    const result = validatePatientData({ ...validPatient, email: 'pasenmail' });
+    assert.equal(result.valid, false);
+  });
+
+  it('doit rejeter un âge négatif', () => {
+    assert.equal(validatePatientData({ ...validPatient, age: -5 }).valid, false);
+  });
+
+  it('doit rejeter un âge de 0', () => {
+    assert.equal(validatePatientData({ ...validPatient, age: 0 }).valid, false);
+  });
+
+  it('doit rejeter un âge irréaliste (≥150)', () => {
+    assert.equal(validatePatientData({ ...validPatient, age: 200 }).valid, false);
   });
 
   it('doit rejeter un genre non répertorié', () => {
-    assert.equal(isValidPatient({ name: 'Alex', age: 25, gender: 'Unknown' }), false);
+    const result = validatePatientData({ ...validPatient, gender: 'Unknown' });
+    assert.equal(result.valid, false);
   });
 
-  it('doit rejeter les données null ou undefined', () => {
-    assert.equal(isValidPatient(null), false);
-    assert.equal(isValidPatient(undefined), false);
-    assert.equal(isValidPatient({}), false);
-  });
-
-});
-
-// ──────────────────────────────────────────────────────────────
-//  2. PROTECTION CONTRE LES INJECTIONS MONGODB
-//  Critique : CVE mongoose CVSS 9.8 (Search Injection)
-//  Contexte : Un attaquant peut accéder à TOUS les patients
-// ──────────────────────────────────────────────────────────────
-describe('Protection contre les injections MongoDB', () => {
-
-  // Simulation d'un sanitizer qui devrait être dans PatientController.js
-  const sanitizeQuery = (input) => {
-    if (typeof input !== 'string') return null;
-    // Rejeter les chaînes qui contiennent des caractères opérateurs MongoDB
-    const forbiddenPatterns = /[\$\{\}]/;
-    return forbiddenPatterns.test(input) ? null : input.trim();
-  };
-
-  const containsMongoOperator = (obj) => {
-    if (typeof obj !== 'object' || obj === null) return false;
-    const dangerousOps = ['$where', '$expr', '$function', '$gt', '$lt', '$ne', '$in', '$regex'];
-    return Object.keys(obj).some(key => dangerousOps.includes(key));
-  };
-
-  it('doit détecter une tentative d\'injection $where (CVE mongoose)', () => {
-    // Attaque réelle possible sur notre app avec mongoose < 8.9.5
-    const maliciousPayload = { '$where': 'function() { return true; }' };
-    assert.equal(containsMongoOperator(maliciousPayload), true,
-      'L\'injection $where doit être détectée');
-  });
-
-  it('doit détecter les opérateurs de comparaison malveillants', () => {
-    const bypassAuth = { '$gt': '' }; // Contourne: { password: { $gt: "" } }
-    assert.equal(containsMongoOperator(bypassAuth), true,
-      'L\'opérateur $gt d\'injection doit être détecté');
-  });
-
-  it('doit accepter une requête de recherche normale', () => {
-    const safeQuery = { name: 'John Doe' };
-    assert.equal(containsMongoOperator(safeQuery), false,
-      'Une requête normale ne doit pas être bloquée');
-  });
-
-  it('doit rejeter les caractères $ dans les entrées textuelles', () => {
-    assert.equal(sanitizeQuery('John Doe'),       'John Doe');
-    assert.equal(sanitizeQuery('{ $gt: "" }'),    null);
-    assert.equal(sanitizeQuery('$where: true'),   null);
-    assert.equal(sanitizeQuery(123),              null); // Type non-string
+  it('doit rejeter des données null ou undefined', () => {
+    assert.equal(validatePatientData(null).valid, false);
+    assert.equal(validatePatientData(undefined).valid, false);
+    assert.equal(validatePatientData({}).valid, false);
   });
 
 });
 
 // ──────────────────────────────────────────────────────────────
-//  3. SÉCURITÉ DE L'AUTHENTIFICATION JWT
-//  Critique : CVE jws CVSS 7.5 — HMAC bypass
-//  Contexte : Usurpation d'identité médecin/administrateur
+//  5. maskSensitiveData — Conformité RGPD Art. 25 dans les logs
+//  Remédie à : SonarCloud L10 — log de données utilisateur
 // ──────────────────────────────────────────────────────────────
-describe('Sécurité de l\'authentification JWT', () => {
+describe('maskSensitiveData — Conformité RGPD dans les logs', () => {
 
-  it('le JWT_SECRET ne doit pas être la valeur par défaut en production', () => {
-    const weakSecrets = ['secret', 'password', '123456', 'default', 'change_me', ''];
-    const currentSecret = process.env.JWT_SECRET || 'test-secret-ci-only';
-
-    if (process.env.NODE_ENV === 'production') {
-      assert.equal(weakSecrets.includes(currentSecret), false,
-        'Le JWT_SECRET ne doit pas être une valeur faible en production');
-      assert.ok(currentSecret.length >= 32,
-        'Le JWT_SECRET doit faire au moins 32 caractères en production');
-    } else {
-      // Environnement CI/test — on vérifie juste que la variable est définie
-      assert.ok(typeof currentSecret === 'string',
-        'JWT_SECRET doit être une chaîne de caractères');
-    }
+  it('doit masquer le mot de passe', () => {
+    const masked = maskSensitiveData({ username: 'admin', password: 'Secret123!' });
+    assert.equal(masked.password, '***MASKED***',
+      'Le mot de passe ne doit jamais apparaître dans les logs');
+    assert.equal(masked.username, 'admin');
   });
 
-  it('un mot de passe haché bcrypt doit avoir le format correct', () => {
-    // Vérifier que notre schéma utilise bcrypt (format $2b$)
-    const bcryptHashPattern = /^\$2[aby]\$\d{2}\$.{53}$/;
-    // Hash bcrypt réel de "TestPassword123!" généré avec bcrypt.hash()
-    const mockBcryptHash = '$2b$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy';
-
-    assert.match(mockBcryptHash, bcryptHashPattern,
-      'Le hash doit respecter le format bcrypt');
+  it('doit masquer l\'email (données de santé RGPD Art. 9)', () => {
+    const masked = maskSensitiveData({ email: 'patient@hospital.ma', name: 'John' });
+    assert.equal(masked.email, '***MASKED***');
+    assert.equal(masked.name, 'John');
   });
 
-  it('un mot de passe en clair ne doit pas ressembler à un hash bcrypt', () => {
-    const plainPassword = 'MonMotDePasse123!';
-    const bcryptHashPattern = /^\$2[aby]\$/;
-    assert.equal(bcryptHashPattern.test(plainPassword), false,
-      'Un mot de passe en clair ne doit pas être stocké comme tel');
+  it('doit masquer le mobile du patient', () => {
+    const masked = maskSensitiveData({ mobile: '0612345678', age: 30 });
+    assert.equal(masked.mobile, '***MASKED***');
+    assert.equal(masked.age, 30);
+  });
+
+  it('doit masquer token et secret', () => {
+    const masked = maskSensitiveData({ token: 'eyJhbGc...', secret: 'shhhh' });
+    assert.equal(masked.token, '***MASKED***');
+    assert.equal(masked.secret, '***MASKED***');
+  });
+
+  it('doit gérer un objet vide sans erreur', () => {
+    const masked = maskSensitiveData({});
+    assert.deepEqual(masked, {});
+  });
+
+  it('doit gérer null et undefined sans planter', () => {
+    assert.deepEqual(maskSensitiveData(null), {});
+    assert.deepEqual(maskSensitiveData(undefined), {});
   });
 
 });
 
 // ──────────────────────────────────────────────────────────────
-//  4. CONFIGURATION SÉCURISÉE DE L'ENVIRONNEMENT
-//  Contexte : Variables sensibles de l'application médicale
+//  6. Tests de Configuration Sécurisée (variables d'environnement)
 // ──────────────────────────────────────────────────────────────
-describe('Configuration sécurisée', () => {
+describe('Configuration sécurisée de l\'environnement', () => {
 
   it('la DB_Url doit être une URL MongoDB valide', () => {
     const dbUrl = process.env.DB_Url || 'mongodb://localhost:27017/hospital';
-    const isValidMongoUrl = dbUrl.startsWith('mongodb://') ||
-                            dbUrl.startsWith('mongodb+srv://');
-    assert.ok(isValidMongoUrl,
-      'DB_Url doit commencer par mongodb:// ou mongodb+srv://');
+    const isValid = dbUrl.startsWith('mongodb://') || dbUrl.startsWith('mongodb+srv://');
+    assert.ok(isValid, 'DB_Url doit commencer par mongodb:// ou mongodb+srv://');
   });
 
-  it('le port backend ne doit pas utiliser de ports système réservés', () => {
+  it('le port backend doit être dans la plage utilisateur [1024-65535]', () => {
     const port = parseInt(process.env.PORT || '6005');
-    assert.notEqual(port, 22,   'Port SSH réservé');
-    assert.notEqual(port, 80,   'Port HTTP réservé au frontend Nginx');
-    assert.notEqual(port, 443,  'Port HTTPS réservé');
-    assert.notEqual(port, 3306, 'Port MySQL réservé');
     assert.ok(port >= 1024 && port <= 65535,
-      `Port ${port} doit être dans la plage utilisateur [1024-65535]`);
+      `Port ${port} doit être dans la plage [1024-65535]`);
+    assert.notEqual(port, 22,  'Port SSH réservé');
+    assert.notEqual(port, 80,  'Port HTTP réservé');
+    assert.notEqual(port, 443, 'Port HTTPS réservé');
   });
 
-  it('la DB_Url ne doit pas contenir de credentials dans l\'URL', () => {
-    const dbUrl = process.env.DB_Url || 'mongodb://localhost:27017/hospital';
-    // Détecter si des credentials sont embarqués dans l'URL (mauvaise pratique)
-    const hasEmbeddedCredentials = /mongodb:\/\/[^:]+:[^@]+@/.test(dbUrl);
-    if (hasEmbeddedCredentials) {
-      // En CI, on avertit mais on ne bloque pas
-      console.warn('[AVERTISSEMENT] La DB_Url contient des credentials — utiliser des variables d\'env séparées');
+  it('JWT_SECRET doit être défini et non vide', () => {
+    const secret = process.env.JWT_SECRET || 'test-secret-ci-only';
+    assert.ok(typeof secret === 'string' && secret.length > 0,
+      'JWT_SECRET doit être une chaîne non vide');
+  });
+
+  it('les secrets faibles ne doivent pas être utilisés en production', () => {
+    const weakSecrets = ['secret', 'password', '123456', 'default', 'change_me', ''];
+    const currentSecret = process.env.JWT_SECRET || 'test-secret-ci-only';
+    if (process.env.NODE_ENV === 'production') {
+      assert.equal(weakSecrets.includes(currentSecret), false,
+        'JWT_SECRET faible interdit en production');
+      assert.ok(currentSecret.length >= 32,
+        'JWT_SECRET doit faire ≥ 32 caractères en production');
+    } else {
+      assert.ok(true, 'Environnement CI — vérification allégée');
     }
-    assert.ok(true, 'Vérification des credentials dans DB_Url effectuée');
-  });
-
-});
-
-// ──────────────────────────────────────────────────────────────
-//  5. TESTS DE STRUCTURE DES DONNÉES MÉDICALES
-//  Contexte : Intégrité des dossiers patients (RGPD Art. 5)
-// ──────────────────────────────────────────────────────────────
-describe('Intégrité des données médicales (RGPD)', () => {
-
-  it('un dossier patient doit avoir les champs obligatoires', () => {
-    const requiredFields = ['name', 'age', 'gender'];
-    const patient = { name: 'Jane Smith', age: 28, gender: 'Female', contact: '' };
-
-    requiredFields.forEach(field => {
-      assert.ok(Object.prototype.hasOwnProperty.call(patient, field),
-        `Le champ obligatoire "${field}" est manquant`);
-    });
-  });
-
-  it('les données sensibles ne doivent pas être loguées en clair', () => {
-    const sensitiveFields = ['password', 'token', 'secret', 'creditCard'];
-    const logData = (obj) => {
-      // Simuler un logger qui masque les champs sensibles
-      const masked = { ...obj };
-      sensitiveFields.forEach(field => {
-        if (masked[field]) masked[field] = '***MASKED***';
-      });
-      return masked;
-    };
-
-    const userPayload = { username: 'admin', password: 'Secret123!', role: 'doctor' };
-    const logged = logData(userPayload);
-
-    assert.equal(logged.password, '***MASKED***',
-      'Le mot de passe ne doit pas apparaître dans les logs');
-    assert.equal(logged.username, 'admin',
-      'Les données non sensibles doivent être visibles');
   });
 
 });

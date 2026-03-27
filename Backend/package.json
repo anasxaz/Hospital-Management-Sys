@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "nodemon server.js",
     "start": "node server.js",
-    "test": "node --test tests/security.test.js"
+    "test": "c8 --reporter=lcov --reporter=text --report-dir=coverage node --test tests/security.test.js"
   },
   "keywords": [],
   "author": "",
@@ -22,5 +22,8 @@
     "mongoose": "^8.7.1",
     "nodemon": "^3.1.7",
     "uuid": "^10.0.0"
+  },
+  "devDependencies": {
+    "c8": "^10.1.3"
   }
 }
